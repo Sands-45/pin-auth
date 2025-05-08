@@ -162,37 +162,38 @@ export class PinAuth {
     };
   }
 
-  // Verifies a PIN against locally stored encrypted data
+  // Verifies a PIN against a provided AuthDataType object
   async verifyPin(pin: string): Promise<AuthDataType | null> {
     await this.deviceKeyInitializationPromise;
 
     if (!this.deviceKey) {
-      console.error("Device key not initialized. Cannot verify PIN.");
+      console.error(
+        "Device key not initialized. Cannot verify PIN against stored data."
+      );
       return null;
     }
 
-    const allStoredRecords = await this.db.pins.toArray();
+    const allDecryptedRecords = await this.getAllDecryptedPinAuthData();
 
-    if (!allStoredRecords || allStoredRecords.length === 0) return null;
+    if (!allDecryptedRecords || allDecryptedRecords.length === 0) {
+      // No data to verify against, or device key was not available for
+      // \ getAllDecryptedPinAuthData
+      return null;
+    }
 
-    for (const storedRecord of allStoredRecords) {
+    for (const decryptedRecord of allDecryptedRecords) {
+      if (
+        !decryptedRecord.auth ||
+        !decryptedRecord.auth.h ||
+        !decryptedRecord.auth.s
+      ) {
+        console.warn(
+          "Skipping record due to missing auth data:",
+          decryptedRecord.id
+        );
+        continue;
+      }
       try {
-        const iv = Uint8Array.from(atob(storedRecord.iv), (c) =>
-          c.charCodeAt(0)
-        );
-        const ciphertext = Uint8Array.from(atob(storedRecord.ciphertext), (c) =>
-          c.charCodeAt(0)
-        );
-
-        const decryptedBuffer = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv },
-          this.deviceKey,
-          ciphertext
-        );
-
-        const decryptedJson = new TextDecoder().decode(decryptedBuffer);
-        const decryptedRecord = JSON.parse(decryptedJson) as AuthDataType;
-
         const { h, s } = decryptedRecord.auth;
         const keyFromStoredSalt = await this.deriveKeyFromSalt(atob(s));
         const signatureToVerify = await crypto.subtle.sign(
@@ -209,16 +210,85 @@ export class PinAuth {
           actualSignature.length === expectedSignature.length &&
           actualSignature.every((val, i) => val === expectedSignature[i])
         ) {
-          // user data without auth values
-          const userData = { ...decryptedRecord, auth: { h: "", s: "" } };
-          return userData;
+          const { auth, ...userData } = decryptedRecord;
+          return userData as AuthDataType;
         }
       } catch (error) {
-        console.error("Error during PIN verification for a record:", error);
-        // Continue to the next record if one fails (e.g., decryption error)
+        console.error(
+          `Error during PIN verification for record ${decryptedRecord.id}:`,
+          error
+        );
       }
     }
     return null;
+  }
+
+  private async decryptRecord(
+    storedRecord: PinAuthRecord
+  ): Promise<AuthDataType | null> {
+    if (!this.deviceKey) {
+      // This check is more of a safeguard; deviceKey should be
+      //  ensured by calling methods.
+      console.error("Device key not available for decryption.");
+      return null;
+    }
+    try {
+      const iv = Uint8Array.from(atob(storedRecord.iv), (c) => c.charCodeAt(0));
+      const ciphertext = Uint8Array.from(atob(storedRecord.ciphertext), (c) =>
+        c.charCodeAt(0)
+      );
+
+      const decryptedBuffer = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv },
+        this.deviceKey,
+        ciphertext
+      );
+
+      const decryptedJson = new TextDecoder().decode(decryptedBuffer);
+      return JSON.parse(decryptedJson) as AuthDataType;
+    } catch (error) {
+      console.error("Error decrypting record:", error);
+      return null;
+    }
+  }
+
+  // Retrieves and decrypts a single user's data by ID
+  async getDecryptedPinAuthDataById(id: string): Promise<AuthDataType | null> {
+    await this.deviceKeyInitializationPromise;
+    if (!this.deviceKey) {
+      console.error(
+        "Device key not initialized. Cannot get decrypted PIN auth data."
+      );
+      return null;
+    }
+
+    const storedRecord = await this.db.pins.get(id);
+    if (!storedRecord) return null;
+
+    return this.decryptRecord(storedRecord);
+  }
+
+  // Retrieves and decrypts all stored user data
+  async getAllDecryptedPinAuthData(): Promise<AuthDataType[]> {
+    await this.deviceKeyInitializationPromise;
+    if (!this.deviceKey) {
+      console.error(
+        "Device key not initialized. Cannot get all decrypted PIN auth data."
+      );
+      return [];
+    }
+
+    const allStoredRecords = await this.db.pins.toArray();
+    if (!allStoredRecords || allStoredRecords.length === 0) return [];
+
+    const decryptedRecords: AuthDataType[] = [];
+    for (const storedRecord of allStoredRecords) {
+      const decrypted = await this.decryptRecord(storedRecord);
+      if (decrypted) {
+        decryptedRecords.push(decrypted);
+      }
+    }
+    return decryptedRecords;
   }
 
   private async deriveKeyFromSalt(saltString: string): Promise<CryptoKey> {
@@ -283,5 +353,55 @@ export class PinAuth {
   // Retrieves all stored user data
   async clearPinAuthData(): Promise<void> {
     await this.db.pins.clear();
+  }
+
+  /**
+   * Checks if a given PIN is unique among a list of existing AuthObjects.
+   * This method is typically used on the server-side or in an admin context
+   * before assigning a new PIN to ensure it's not already in use.
+   * It does not interact with IndexedDB or use the deviceKey.
+   * @param pin The PIN string to check for uniqueness.
+   * @param existingAuthObjects An array of AuthObject items to check against.
+   * @returns Promise<boolean> True if the PIN is unique, false otherwise.
+   */
+  async isPinUnique(
+    pin: string,
+    existingAuthObjects: AuthObject[]
+  ): Promise<boolean> {
+    if (!existingAuthObjects || existingAuthObjects.length === 0) {
+      return true;
+    }
+
+    for (const authObject of existingAuthObjects) {
+      if (!authObject || !authObject.h || !authObject.s) {
+        console.warn("Skipping invalid AuthObject in isPinUnique check.");
+        continue;
+      }
+      try {
+        const keyFromSalt = await this.deriveKeyFromSalt(atob(authObject.s));
+        const signatureToVerify = await crypto.subtle.sign(
+          "HMAC",
+          keyFromSalt,
+          new TextEncoder().encode(pin)
+        );
+        const actualSignature = new Uint8Array(signatureToVerify);
+        const expectedSignature = Uint8Array.from(atob(authObject.h), (c) =>
+          c.charCodeAt(0)
+        );
+
+        if (
+          actualSignature.length === expectedSignature.length &&
+          actualSignature.every((val, i) => val === expectedSignature[i])
+        ) {
+          return false;
+        }
+      } catch (error) {
+        console.error(
+          "Error during isPinUnique check for an authObject:",
+          error
+        );
+      }
+    }
+    return true;
   }
 }

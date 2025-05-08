@@ -1,6 +1,6 @@
 {
   "name": "pin-auth",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Local Pin Authentication Ideally for POS Systems to be used with other authentication methods",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
