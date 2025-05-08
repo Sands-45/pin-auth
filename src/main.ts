@@ -15,17 +15,19 @@ export class PinAuth {
   private deviceKeyInitializationPromise: Promise<void>;
 
   private db: Dexie & { pins: Table<PinAuthRecord, any> };
+  private default_db_name = "pin-auth-store";
+  static readonly version = "0.0.3";
 
   constructor(config: PinAuthConfig) {
     this.orgId = config.orgId;
     this.salt = config.salt ?? crypto.getRandomValues(new Uint8Array(16));
-    this.localDbName = config.localDbName ?? "pin-auth-store";
+    this.localDbName = config.localDbName ?? this.default_db_name;
 
     this.db = new Dexie(this.localDbName) as Dexie & {
       pins: Table<PinAuthRecord, any>;
     };
     this.db.version(1).stores({
-      pins: "id", // Primary key
+      pins: "id",
     });
 
     let rawKeyToImport: Uint8Array | undefined;
@@ -80,6 +82,68 @@ export class PinAuth {
       false,
       ["sign", "verify"]
     );
+  }
+
+  /* Update config function if PinAuth is already initialized else ask user
+     to initialize before using updatePinAuthConfig
+  */
+  async reinitializePinAuth(config: PinAuthConfig): Promise<PinAuth> {
+    // Update core configuration that affects HMAC key derivation
+    this.orgId = config.orgId;
+    // Use salt from config if provided, otherwise generate a new random salt
+    this.salt = config.salt ?? crypto.getRandomValues(new Uint8Array(16));
+
+    // Update localDbName only if explicitly provided in the config
+    if (config.localDbName !== undefined) {
+      this.localDbName = config.localDbName;
+      // Reinitialize the database with the new name
+      this.db = new Dexie(config.localDbName) as Dexie & {
+        pins: Table<PinAuthRecord, any>;
+      };
+      this.db.version(1).stores({
+        pins: "id",
+      });
+    }
+
+    // Re-derive HMAC key as orgId or salt has changed
+    this.hmacKeyPromise = this.deriveHmacKey();
+
+    // Clear existing PIN data as it's tied to the
+    //old orgId/salt configuration
+    await this.clearPinAuthData();
+
+    // Handle device key
+    const wantsToSetDeviceKey = config.deviceKeyRaw || config.deviceKeyString;
+
+    if (this.deviceKey) {
+      // Device key is already set.
+      if (wantsToSetDeviceKey) {
+        console.warn(
+          "Device key is already set and cannot be changed via updatePinAuthConfig. " +
+            "Ignoring new device key parameters. To change the device key, reinitialize PinAuth."
+        );
+      }
+    } else {
+      // No deviceKey currently set. Try to initialize if provided in config.
+      let rawKeyToImport: Uint8Array | undefined;
+      if (config.deviceKeyRaw) {
+        rawKeyToImport = config.deviceKeyRaw;
+      } else if (config.deviceKeyString) {
+        rawKeyToImport = new TextEncoder().encode(
+          config.deviceKeyString.padEnd(32, "_")
+        );
+      }
+
+      if (rawKeyToImport) {
+        // Import the new device key.
+        this.deviceKeyInitializationPromise =
+          this.importDeviceKey(rawKeyToImport);
+        await this.deviceKeyInitializationPromise;
+      }
+    }
+
+    // return the updated instance
+    return this;
   }
 
   // Hashes a PIN and returns the auth object
@@ -180,6 +244,7 @@ export class PinAuth {
     );
   }
 
+  // Adds or updates user data with encrypted PIN
   async addPinAuthData(data: AuthDataType[]): Promise<void> {
     await this.deviceKeyInitializationPromise;
     if (!this.deviceKey)
@@ -210,10 +275,12 @@ export class PinAuth {
     }
   }
 
+  // Updates user data with encrypted PIN
   async updatePinAuthData(data: AuthDataType[]): Promise<void> {
     return this.addPinAuthData(data);
   }
 
+  // Retrieves all stored user data
   async clearPinAuthData(): Promise<void> {
     await this.db.pins.clear();
   }

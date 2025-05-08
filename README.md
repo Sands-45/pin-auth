@@ -96,7 +96,7 @@ new PinAuth(config: PinAuthConfig)
 
 #### `addPinAuthData(data: AuthDataType[]): Promise<void>`
 
-* Encrypts and stores an array of user data to local IndexedDB
+* Encrypts and stores an array of user data to local IndexedDB (dexie)
 * Requires a device key to be set
 * Each object should contain an `auth` object as described in `encryptPin`
 
@@ -117,6 +117,7 @@ new PinAuth(config: PinAuthConfig)
 ```ts
 const auth = new PinAuth({ orgId: 'org_123' });
 const { auth: authObject } = await auth.encryptPin('123456');
+
 // Save user object like { id: 'user1', name: 'Anna', auth: authObject } to the database
 ```
 
@@ -166,7 +167,6 @@ await auth.clearPinAuthData();
 * Device keys can be strings or raw bytes; strings are UTF-8 encoded and padded to 32 bytes
 * AES-GCM with a new IV is used for every encryption
 * IndexedDB is used only in browser environments
-* Ensure the Firestore document ID used as device key remains secret on the client
 * Stored user data should include the `auth` object with `h` and `s` for secure PIN matching
 
 ---
