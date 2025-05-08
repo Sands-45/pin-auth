@@ -1,6 +1,6 @@
 {
   "name": "pin-auth",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Local Pin Authentication Ideally for POS Systems to be used with other authentication methods",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -20,8 +20,10 @@
   "author": "Sands",
   "license": "MIT",
   "devDependencies": {
-    "dexie": "^4.0.11",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "dexie": "^4.0.11"
   }
 }
